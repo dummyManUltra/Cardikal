@@ -241,7 +241,7 @@ def _find_font_file(base_name: str):
 
 def _find_ramis_file():
     """Ramis_Arabic.otf/.ttf — looked up in ./fonts/ first, then next to bot.py."""
-    for d in (FONTS_DIR, BASE_DIR):
+    for d in _ramis_search_dirs():
         for base in ("Ramis_Arabic", "RamisArabic", "Ramis-Arabic", "Ramis Arabic"):
             for ext in (".otf", ".ttf", ".OTF", ".TTF"):
                 p = os.path.join(d, base + ext)
@@ -249,10 +249,26 @@ def _find_ramis_file():
                     return p
     return None
 
+def _ramis_search_dirs():
+    """./fonts/ and next to bot.py, plus their sub-folders (so an unzipped pack such as
+    fonts/bolder/*.ttf is found too)."""
+    out = []
+    for root in (FONTS_DIR, BASE_DIR):
+        if not os.path.isdir(root):
+            continue
+        for dp, dn, _fn in os.walk(root):
+            dn[:] = sorted(d for d in dn if not d.startswith(".") and d not in ("__pycache__", "node_modules", "venv"))
+            if dp[len(root):].count(os.sep) >= 3:
+                dn[:] = []
+            if dp not in out:
+                out.append(dp)
+    return out
+
 def _find_ramis_weight(keyword: str):
     """A Ramis Arabic file whose name contains `keyword` (e.g. "medium", "extrabold"),
-    looked up in ./fonts/ first, then next to bot.py. .ttf preferred (reportlab can't embed CFF)."""
-    for d in (FONTS_DIR, BASE_DIR):
+    looked up in ./fonts/ first, then next to bot.py, then their sub-folders.
+    .ttf preferred (reportlab can't embed CFF)."""
+    for d in _ramis_search_dirs():
         try:
             names = sorted(os.listdir(d), key=lambda n: (not n.lower().endswith(".ttf"), n))
         except Exception:
@@ -1181,7 +1197,7 @@ def _init_ramis():
     src = (_find_ramis_weight("medium") or _find_ramis_weight("regular") or _find_ramis_file()
            or _find_ramis_weight("bold") or _find_ramis_weight("extrabold"))
     if not src:
-        print("Ramis Arabic font not found — put Ramis_Arabic.otf in ./fonts/ . "
+        print(f"Ramis Arabic font not found (looked in {FONTS_DIR} and {BASE_DIR}) — put the Ramis .ttf files in ./fonts/ . "
               "Arabic will use the fallback fonts.")
         return
     try:
@@ -2129,6 +2145,15 @@ def _clipboard_box_width(max_num: int, letters: list, font_bold: str, fs: float 
     return max(60.0, 28 + num_w + 6 + let_w + 13)
 
 AK_ZIKR_LINES = ("سبحان اللّٰه وبحمده", "سبحان اللّٰه العظيم")   # printed above the answer box
+
+# Ready-made VISUAL-order (left-to-right drawing) versions of the two default dhikr lines, written with
+# Arabic presentation forms (already joined; Allah = the U+FDF2 ligature). Used ONLY when the Ramis
+# engine is not loaded, so the zikr still comes out joined and in the right order.
+_ZIKR_DEFAULT_LINES = ("سبحان اللّٰه وبحمده", "سبحان اللّٰه العظيم")
+_ZIKR_PREJOINED = (
+    "\ufee9\ufeaa\ufee4\ufea4\ufe91\ufeed \ufdf2 \ufee5\ufe8e\ufea4\ufe92\ufeb3",
+    "\ufee2\ufef4\ufec8\ufecc\ufedf\ufe8d \ufdf2 \ufee5\ufe8e\ufea4\ufe92\ufeb3",
+)
 AK_ZIKR_FS    = 12
 AK_ZIKR_LEAD  = 1.3
 AK_ZIKR_H     = len(AK_ZIKR_LINES) * AK_ZIKR_FS * AK_ZIKR_LEAD + 6   # height reserved above the box (pt)
@@ -2250,11 +2275,14 @@ class _AnswerKeyCanvas(_canvas.Canvas):
         lines = []
         _AR_TLS.weight = "xb"
         try:
-            for ln in AK_ZIKR_LINES:
-                try:
-                    lines.append(_rtl_visual_line(ln))
-                except Exception:
-                    lines.append(ln)
+            if not RAMIS_READY and tuple(AK_ZIKR_LINES) == _ZIKR_DEFAULT_LINES:
+                lines = list(_ZIKR_PREJOINED)          # no Ramis engine: use the ready-made joined forms
+            else:
+                for ln in AK_ZIKR_LINES:
+                    try:
+                        lines.append(_rtl_visual_line(ln))
+                    except Exception:
+                        lines.append(ln)
             widest = max(_visual_width(t, self._ak_font_bold, True, 1.0) for t in lines) or 1.0
             fs = max(6.0, min(AK_ZIKR_FS + 2, (w - 6) / widest))
             col = colors.HexColor(self._ak_theme["ak"]["P600"])
