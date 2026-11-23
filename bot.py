@@ -1176,7 +1176,10 @@ def _build_ramis_shaped_font(src: str, dst: str):
 
 def _init_ramis():
     global RAMIS_READY, RAMIS_XB_READY, _RAMIS_JOIN, _RAMIS_FORMS, _RAMIS_LAMALEF, _RAMIS_ALLAH, _RAMIS_COMP, _RAMIS_PUA
-    src = _find_ramis_weight("medium") or _find_ramis_file()
+    # Body weight: Medium/Regular if shipped, else the plain Ramis file, else Bold (e.g. the
+    # RamisArabicTRIAL-Bold.ttf from the trial pack), else ExtraBold alone — so ANY Ramis file works.
+    src = (_find_ramis_weight("medium") or _find_ramis_weight("regular") or _find_ramis_file()
+           or _find_ramis_weight("bold") or _find_ramis_weight("extrabold"))
     if not src:
         print("Ramis Arabic font not found — put Ramis_Arabic.otf in ./fonts/ . "
               "Arabic will use the fallback fonts.")
