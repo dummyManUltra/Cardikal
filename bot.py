@@ -8,7 +8,6 @@ import html
 import tempfile
 import traceback
 import asyncio
-import math
 import itertools
 import zlib
 import threading
@@ -53,7 +52,6 @@ from io import BytesIO
 
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, MessageEntity,
                       BotCommand, MenuButtonCommands, ReplyKeyboardMarkup, KeyboardButton)
-from telegram.error import TimedOut, NetworkError, BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -241,7 +239,7 @@ def _find_font_file(base_name: str):
 
 def _find_ramis_file():
     """Ramis_Arabic.otf/.ttf — looked up in ./fonts/ first, then next to bot.py."""
-    for d in _ramis_search_dirs():
+    for d in (FONTS_DIR, BASE_DIR):
         for base in ("Ramis_Arabic", "RamisArabic", "Ramis-Arabic", "Ramis Arabic"):
             for ext in (".otf", ".ttf", ".OTF", ".TTF"):
                 p = os.path.join(d, base + ext)
@@ -249,26 +247,10 @@ def _find_ramis_file():
                     return p
     return None
 
-def _ramis_search_dirs():
-    """./fonts/ and next to bot.py, plus their sub-folders (so an unzipped pack such as
-    fonts/bolder/*.ttf is found too)."""
-    out = []
-    for root in (FONTS_DIR, BASE_DIR):
-        if not os.path.isdir(root):
-            continue
-        for dp, dn, _fn in os.walk(root):
-            dn[:] = sorted(d for d in dn if not d.startswith(".") and d not in ("__pycache__", "node_modules", "venv"))
-            if dp[len(root):].count(os.sep) >= 3:
-                dn[:] = []
-            if dp not in out:
-                out.append(dp)
-    return out
-
 def _find_ramis_weight(keyword: str):
     """A Ramis Arabic file whose name contains `keyword` (e.g. "medium", "extrabold"),
-    looked up in ./fonts/ first, then next to bot.py, then their sub-folders.
-    .ttf preferred (reportlab can't embed CFF)."""
-    for d in _ramis_search_dirs():
+    looked up in ./fonts/ first, then next to bot.py. .ttf preferred (reportlab can't embed CFF)."""
+    for d in (FONTS_DIR, BASE_DIR):
         try:
             names = sorted(os.listdir(d), key=lambda n: (not n.lower().endswith(".ttf"), n))
         except Exception:
@@ -557,31 +539,6 @@ THEMES = {
     "slate":  _theme("🖤 رمادي", "#1E293B", "#334155",
                      ("#0F172A", "#1E293B", "#475569", "#64748B", "#94A3B8", "#CBD5E1", "#E2E8F0"),
                      ("#F8FAFC", "#CBD5E1")),
-    # ── pastel / gradient-frame friendly themes (pink ↔ blue ↔ lavender frames) ──
-    "blend":  _theme("🌈 وردي × أزرق", "#4B4768", "#C95E96",
-                     ("#3B3558", "#4B4768", "#6A6AA8", "#8585C0", "#A3A3D3", "#C4C4E4", "#E0E0F2"),
-                     ("#F3EFFA", "#D8CCEE"), q_num="#D6659A", sep="#C9B8E8", gk=("#F6F3FB", "#B6A8DA")),
-    "peri":   _theme("🦋 بيريوينكل", "#3A4D8F", "#5B7FCF",
-                     ("#2B3A67", "#3A4D8F", "#5B7FCF", "#7B9AE0", "#9DB4EA", "#C0CEF3", "#DCE5F9"),
-                     ("#F1F5FD", "#C9D6F2"), q_num="#D6659A"),
-    "rose":   _theme("🌸 وردي ناعم", "#9B3C5F", "#D6659A",
-                     ("#7A2E4A", "#9B3C5F", "#D6659A", "#E07FAE", "#EA9DC1", "#F2BCD6", "#F8DCE9"),
-                     ("#FDF2F7", "#F4C6DB"), q_num="#5B7FCF"),
-    "lilac":  _theme("🔮 ليلكي", "#5F4B9A", "#8B72D6",
-                     ("#4C3A7A", "#5F4B9A", "#8B72D6", "#A18BE3", "#B9A8EC", "#D2C6F4", "#E8E1FA"),
-                     ("#F6F3FD", "#D9CFF5"), q_num="#D6659A"),
-    "indigo": _theme("💠 نيلي", "#3730A3", "#4F46E5",
-                     ("#312E81", "#3730A3", "#4F46E5", "#6366F1", "#818CF8", "#A5B4FC", "#C7D2FE"),
-                     ("#EEF2FF", "#C7D2FE"), q_num="#DB2777"),
-    "orchid": _theme("🪻 أوركيد", "#86198F", "#C026D3",
-                     ("#701A75", "#86198F", "#C026D3", "#D946EF", "#E879F9", "#F0ABFC", "#F5D0FE"),
-                     ("#FDF4FF", "#F5D0FE"), q_num="#2563EB"),
-    "mauve":  _theme("🍇 موف", "#6B3463", "#9D4E8F",
-                     ("#4A2545", "#6B3463", "#9D4E8F", "#B565A7", "#C98BBE", "#DDB3D5", "#EED7EA"),
-                     ("#F9F0F8", "#E6C9E1"), q_num="#4F6FC8"),
-    "denim":  _theme("🌌 كحلي", "#243566", "#3B5BA5",
-                     ("#1E2A4A", "#243566", "#3B5BA5", "#5578BF", "#7F9ACF", "#AEC0E3", "#D3DDF2"),
-                     ("#F0F4FB", "#C3D0EA"), q_num="#C2528B"),
 }
 
 def get_theme(key):
@@ -1192,12 +1149,9 @@ def _build_ramis_shaped_font(src: str, dst: str):
 
 def _init_ramis():
     global RAMIS_READY, RAMIS_XB_READY, _RAMIS_JOIN, _RAMIS_FORMS, _RAMIS_LAMALEF, _RAMIS_ALLAH, _RAMIS_COMP, _RAMIS_PUA
-    # Body weight: Medium/Regular if shipped, else the plain Ramis file, else Bold (e.g. the
-    # RamisArabicTRIAL-Bold.ttf from the trial pack), else ExtraBold alone — so ANY Ramis file works.
-    src = (_find_ramis_weight("medium") or _find_ramis_weight("regular") or _find_ramis_file()
-           or _find_ramis_weight("bold") or _find_ramis_weight("extrabold"))
+    src = _find_ramis_weight("medium") or _find_ramis_file()
     if not src:
-        print(f"Ramis Arabic font not found (looked in {FONTS_DIR} and {BASE_DIR}) — put the Ramis .ttf files in ./fonts/ . "
+        print("Ramis Arabic font not found — put Ramis_Arabic.otf in ./fonts/ . "
               "Arabic will use the fallback fonts.")
         return
     try:
@@ -2145,15 +2099,6 @@ def _clipboard_box_width(max_num: int, letters: list, font_bold: str, fs: float 
     return max(60.0, 28 + num_w + 6 + let_w + 13)
 
 AK_ZIKR_LINES = ("سبحان اللّٰه وبحمده", "سبحان اللّٰه العظيم")   # printed above the answer box
-
-# Ready-made VISUAL-order (left-to-right drawing) versions of the two default dhikr lines, written with
-# Arabic presentation forms (already joined; Allah = the U+FDF2 ligature). Used ONLY when the Ramis
-# engine is not loaded, so the zikr still comes out joined and in the right order.
-_ZIKR_DEFAULT_LINES = ("سبحان اللّٰه وبحمده", "سبحان اللّٰه العظيم")
-_ZIKR_PREJOINED = (
-    "\ufee9\ufeaa\ufee4\ufea4\ufe91\ufeed \ufdf2 \ufee5\ufe8e\ufea4\ufe92\ufeb3",
-    "\ufee2\ufef4\ufec8\ufecc\ufedf\ufe8d \ufdf2 \ufee5\ufe8e\ufea4\ufe92\ufeb3",
-)
 AK_ZIKR_FS    = 12
 AK_ZIKR_LEAD  = 1.3
 AK_ZIKR_H     = len(AK_ZIKR_LINES) * AK_ZIKR_FS * AK_ZIKR_LEAD + 6   # height reserved above the box (pt)
@@ -2275,14 +2220,11 @@ class _AnswerKeyCanvas(_canvas.Canvas):
         lines = []
         _AR_TLS.weight = "xb"
         try:
-            if not RAMIS_READY and tuple(AK_ZIKR_LINES) == _ZIKR_DEFAULT_LINES:
-                lines = list(_ZIKR_PREJOINED)          # no Ramis engine: use the ready-made joined forms
-            else:
-                for ln in AK_ZIKR_LINES:
-                    try:
-                        lines.append(_rtl_visual_line(ln))
-                    except Exception:
-                        lines.append(ln)
+            for ln in AK_ZIKR_LINES:
+                try:
+                    lines.append(_rtl_visual_line(ln))
+                except Exception:
+                    lines.append(ln)
             widest = max(_visual_width(t, self._ak_font_bold, True, 1.0) for t in lines) or 1.0
             fs = max(6.0, min(AK_ZIKR_FS + 2, (w - 6) / widest))
             col = colors.HexColor(self._ak_theme["ak"]["P600"])
@@ -5791,25 +5733,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(MSG_EXPORT_EMPTY)
             return
         label = {(True,): " · answered", (False,): " · blank"}.get(versions, "")
-        asyncio.create_task(_run_export_job(context, query.message, user_id, kind, versions, items, name))
-
-    elif query.data == "cancel_export":
-        job = EXPORT_JOBS.get(user_id)
-        if job and not job["task"].done():
-            job["task"].cancel()
+        await query.message.reply_text(MSG_EXPORT_GENERATING.format(kind=kind + label, count=len(items)))
+        if kind == "PDF":
+            await _export_pdf_session(context, query.message, user_id, items, name, versions)
+        elif kind == "PPTX":
+            await _export_pptx_session(context, query.message, user_id, items, name, versions)
         else:
-            try:
-                await query.edit_message_text("ℹ️ مفيش توليد شغال دلوقتي.")
-            except Exception:
-                pass
-
-    elif query.data == "retry_export":
-        last = EXPORT_LAST.get(user_id)
-        if not last or not PDF_BUFFER.get(user_id):
-            await query.message.reply_text("⚠️ مفيش حاجة أعيدها — ابدأ التصدير من الأزرار تاني.")
-        else:
-            kind, versions, nm = last
-            asyncio.create_task(_run_export_job(context, query.message, user_id, kind, versions, PDF_BUFFER[user_id], PDF_NAMES.get(user_id, nm)))
+            await _export_docx_session(context, query.message, user_id, items, name, versions)
 
     elif query.data == "toggle_written":
         PDF_WRITTEN_SHOW[user_id] = not PDF_WRITTEN_SHOW.get(user_id, True)
@@ -6262,143 +6192,6 @@ def _reset_pdf_session(user_id: int) -> None:
     # here — unlike everything above, they're meant to stay remembered
     # across sessions (until /clear_cover, /clear_frame, or a bot restart).
 
-# ═══════════════════════════════════════════════════════════════
-# EXPORT JOB RUNNER — progress bar, 2-minute step timeout, cancel button, retry
-# ═══════════════════════════════════════════════════════════════
-import contextvars
-EXPORT_STEP_TIMEOUT = 120          # seconds allowed for each build step and each upload
-_EXP = contextvars.ContextVar("export_job_state", default=None)
-EXPORT_JOBS = {}                   # user_id -> {"task": Task, "state": dict}
-EXPORT_LAST = {}                   # user_id -> args of the last export (for 🔁 retry)
-
-async def _xbuild(fn, *args, **kwargs):
-    """Runs one (blocking) build in a thread, tracked by the progress bar, with the step timeout."""
-    st = _EXP.get()
-    if st:
-        st.update(phase="build", t0=time.time())
-    res = await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), EXPORT_STEP_TIMEOUT)
-    if st:
-        st["built"] += 1
-    return res
-
-async def _xsend(message, document=None, **kwargs):
-    """Uploads one file with the long (2-minute) network timeouts, tracked by the progress bar."""
-    st = _EXP.get()
-    if st:
-        try:
-            size = len(document.getvalue())
-        except Exception:
-            size = 500_000
-        st.update(phase="upload", t0=time.time(), size=size)
-    out = await message.reply_document(
-        document=document, read_timeout=EXPORT_STEP_TIMEOUT, write_timeout=EXPORT_STEP_TIMEOUT,
-        connect_timeout=30, pool_timeout=EXPORT_STEP_TIMEOUT, **kwargs)
-    if st:
-        st["sent"] += 1
-    return out
-
-def _progress_bar(pct: float, width: int = 12) -> str:
-    pct = max(0.0, min(1.0, pct))
-    n = int(round(pct * width))
-    return "▰" * n + "▱" * (width - n) + f" {int(pct * 100)}%"
-
-def _export_progress(st: dict) -> float:
-    n = max(1, st["n"])
-    now = time.time() - st.get("t0", time.time())
-    if st["phase"] == "build":
-        est = 6 + 0.35 * st.get("items", 10)
-        creep = min(0.92, 1 - math.exp(-now / est))
-        done = (st["built"] + creep) * 0.6 + st["sent"] * 0.4
-    elif st["phase"] == "upload":
-        est = max(3.0, st.get("size", 500_000) / 350_000)
-        creep = min(0.92, 1 - math.exp(-now / est))
-        done = st["built"] * 0.6 + (st["sent"] + creep) * 0.4
-    else:
-        done = st["built"] * 0.6 + st["sent"] * 0.4
-    return min(done / n, 0.99)
-
-def _export_status_text(st: dict, kind: str, count: int) -> str:
-    phase = {"build": "🛠 بجهّز الملف", "upload": "📤 برفع الملف"}.get(st["phase"], "⏳ بجهّز")
-    step = min(st["n"], (st["built"] if st["phase"] == "build" else st["sent"]) + 1)
-    el = int(time.time() - st["start"])
-    return (f"⏳ <b>جاري توليد {kind}</b> · {count} عنصر\n"
-            f"{_progress_bar(_export_progress(st))}\n"
-            f"{phase} ({step}/{st['n']}) · {el}ث")
-
-def _cancel_export_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="cancel_export")]])
-
-def _retry_export_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔁 حاول تاني", callback_data="retry_export")]])
-
-async def _run_export_job(context, message, user_id: int, kind: str, versions: tuple, items: list, name: str) -> None:
-    """Generates + uploads an export with a live progress bar and a ❌ cancel button.
-    Each build / upload step gets up to 2 minutes; a timeout or failure is reported with a retry button."""
-    job = EXPORT_JOBS.get(user_id)
-    if job and not job["task"].done():
-        await message.reply_text("⏳ فيه ملف بيتولّد دلوقتي — استنى لحد ما يخلص أو دوس ❌ إلغاء.")
-        return
-    EXPORT_LAST[user_id] = (kind, versions, name)
-    st = dict(phase="build", t0=time.time(), start=time.time(), built=0, sent=0, n=len(versions), items=len(items), size=0)
-    status = await message.reply_text(_export_status_text(st, kind, len(items)),
-                                      parse_mode=ParseMode.HTML, reply_markup=_cancel_export_kb())
-
-    async def _work():
-        _EXP.set(st)
-        fn = {"PDF": _export_pdf_session, "PPTX": _export_pptx_session}.get(kind, _export_docx_session)
-        return await fn(context, message, user_id, items, name, versions)
-
-    task = asyncio.create_task(_work())
-    EXPORT_JOBS[user_id] = {"task": task, "state": st}
-
-    async def _tick():
-        last = ""
-        while not task.done():
-            await asyncio.sleep(2.0)
-            if task.done():
-                break
-            txt = _export_status_text(st, kind, len(items))
-            if txt != last:
-                last = txt
-                try:
-                    await status.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=_cancel_export_kb())
-                except Exception:
-                    pass
-    ticker = asyncio.create_task(_tick())
-    final, kb = None, None
-    try:
-        ok = await task
-        final = (f"✅ <b>تم</b> — {kind} اتبعت\n{_progress_bar(1.0)}" if ok is not False
-                 else "❌ <b>فشل التوليد</b> — التفاصيل في الرسالة اللي فوق.")
-        kb = None if ok is not False else _retry_export_kb()
-    except asyncio.CancelledError:
-        final, kb = "🚫 <b>اتلغى</b> — مفيش ملف اتبعت.", None
-    except asyncio.TimeoutError:
-        final = (f"⌛ <b>انتهت المهلة</b> — التوليد خد أكتر من {EXPORT_STEP_TIMEOUT} ثانية.\n"
-                 "جرّب تاني، أو قلل عدد الأسئلة/حجم الصور.")
-        kb = _retry_export_kb()
-    except TimedOut:
-        final = (f"⌛ <b>انتهت مهلة الرفع</b> ({EXPORT_STEP_TIMEOUT} ثانية) — النت أو سيرفر تليجرام بطيء.\n"
-                 "ممكن الملف يكون وصل، اتأكد من الشات، أو دوس 🔁.")
-        kb = _retry_export_kb()
-    except NetworkError as e:
-        final = f"📡 <b>فشل الرفع</b> — مشكلة في الاتصال.\n<code>{html.escape(str(e))[:200]}</code>"
-        kb = _retry_export_kb()
-    except Exception as e:
-        traceback.print_exc()
-        final = f"❌ <b>فشل</b>\n<code>{html.escape(str(e))[:300]}</code>"
-        kb = _retry_export_kb()
-    finally:
-        ticker.cancel()
-        EXPORT_JOBS.pop(user_id, None)
-    try:
-        await status.edit_text(final, parse_mode=ParseMode.HTML, reply_markup=kb)
-    except Exception:
-        try:
-            await message.reply_text(final, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except Exception:
-            pass
-
 async def _export_pdf_session(context: ContextTypes.DEFAULT_TYPE, message, session_id: int,
                                items: list, name: str, versions: tuple = (True, False)) -> bool:
     """Builds the PDF from items and sends the requested version(s) via
@@ -6429,10 +6222,8 @@ async def _export_pdf_session(context: ContextTypes.DEFAULT_TYPE, message, sessi
     built = []
     try:
         for show in versions:
-            data = await _xbuild(build_pdf, items, name, show_answers=show, **kw)
+            data = await asyncio.to_thread(build_pdf, items, name, show_answers=show, **kw)
             built.append((show, data))
-    except asyncio.TimeoutError:
-        raise                                  # reported by the job runner (⌛ message + retry)
     except Exception as e:
         print("PDF ERROR:", e)
         traceback.print_exc()
@@ -6442,7 +6233,7 @@ async def _export_pdf_session(context: ContextTypes.DEFAULT_TYPE, message, sessi
         )
         return False
     for show, data in built:
-        await _xsend(message,
+        await message.reply_document(
             document=data, filename=f"{safe}_{'answered' if show else 'blank'}.pdf",
             caption=MSG_PDF_CAPTION.format(count=len(items), name=name,
                                             label=LABEL_ANSWERED if show else LABEL_BLANK,
@@ -6476,12 +6267,10 @@ async def _export_pptx_session(context: ContextTypes.DEFAULT_TYPE, message, sess
     try:
         built = []
         for show in versions:
-            built.append((show, await _xbuild(build_pptx, items, name, show_answers=show, **kw)))
+            built.append((show, await asyncio.to_thread(build_pptx, items, name, show_answers=show, **kw)))
     except ImportError:
         await message.reply_text("❌ مكتبة python-pptx مش متسطّبة على السيرفر. نزّلها بـ: pip install python-pptx")
         return False
-    except asyncio.TimeoutError:
-        raise                                  # reported by the job runner (⌛ message + retry)
     except Exception as e:
         print("PPTX ERROR:", e)
         traceback.print_exc()
@@ -6491,7 +6280,7 @@ async def _export_pptx_session(context: ContextTypes.DEFAULT_TYPE, message, sess
         )
         return False
     for show, data in built:
-        await _xsend(message,
+        await message.reply_document(
             document=data, filename=f"{safe}_{'answered' if show else 'blank'}.pptx",
             caption=f"📊 <b>{html.escape(name)}</b> · {len(items)} · {LABEL_ANSWERED if show else LABEL_BLANK}",
             parse_mode=ParseMode.HTML,
@@ -6547,12 +6336,10 @@ async def _export_docx_session(context: ContextTypes.DEFAULT_TYPE, message, sess
     try:
         built = []
         for show in versions:
-            built.append((show, await _xbuild(_make, show)))
+            built.append((show, await asyncio.to_thread(_make, show)))
     except ImportError:
         await message.reply_text("❌ مكتبة python-docx مش متسطّبة على السيرفر. نزّلها بـ: pip install python-docx")
         return False
-    except asyncio.TimeoutError:
-        raise                                  # reported by the job runner (⌛ message + retry)
     except Exception as e:
         print("DOCX ERROR:", e)
         traceback.print_exc()
@@ -6562,7 +6349,7 @@ async def _export_docx_session(context: ContextTypes.DEFAULT_TYPE, message, sess
         )
         return False
     for show, data in built:
-        await _xsend(message,
+        await message.reply_document(
             document=data, filename=f"{safe}_{'answered' if show else 'blank'}.docx",
             caption=MSG_DOCX_CAPTION.format(count=len(items), name=html.escape(name),
                                              label=LABEL_ANSWERED if show else LABEL_BLANK,
@@ -6588,7 +6375,8 @@ async def pdf_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(MSG_PDF_EMPTY)
         return
     name = PDF_NAMES.get(user_id, "questions")
-    await _run_export_job(context, update.message, user_id, "PDF", (True, False), items, name)
+    await update.message.reply_text(MSG_PDF_GENERATING.format(count=len(items)))
+    await _export_pdf_session(context, update.message, user_id, items, name)
 
 async def docx_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_chat.id
@@ -6597,7 +6385,8 @@ async def docx_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(MSG_PDF_EMPTY)
         return
     name = PDF_NAMES.get(user_id, "questions")
-    await _run_export_job(context, update.message, user_id, "DOCX", (True, False), items, name)
+    await update.message.reply_text(MSG_EXPORT_GENERATING.format(kind="DOCX", count=len(items)))
+    await _export_docx_session(context, update.message, user_id, items, name)
 
 async def pdf_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_chat.id
