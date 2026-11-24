@@ -1,11 +1,12 @@
-python-telegram-bot[rate-limiter]
+python-telegram-bot[rate-limiter]>=20.7
 reportlab
-# Needed for Arabic (and nebrew) to render joined and in the right direction.
-# Without these the bot still runs, but Arabic text comes out disconnected/reversed.
+pillow
+fonttools
 arabic-reshaper
 python-bidi
-genanki
-pypdfium2
-pymupdf
 python-docx
 python-pptx
+pdfplumber
+pypdfium2
+genanki
+lxml
