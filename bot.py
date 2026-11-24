@@ -3419,7 +3419,7 @@ def build_pdf(items: list, doc_title: str = "questions", font_path: str = None,
                         block.append(Paragraph(f"[Image error: {pdf_safe_markup(str(e), font_name)}]", WRITTEN_BODY))
                 else:
                     block.append(w_title)
-                if show_answers and show_written_answers:
+                if show_written_answers:
                     if item.get("content"):
                         block.append(mk_para(item["content"], WRITTEN_ANSWER, bold=True, br=True))
                     if item.get("answer_image"):           # spoilered picture = the ANSWER (answered PDF only)
@@ -4124,7 +4124,7 @@ def build_docx(items: list, doc_title: str = "questions", font_path: str = None,
             add_text(p, title, size=12 * FS, bold=True, color=Q_TEXT_COLOR.lstrip("#"), rtl=trtl)
             if item.get("image"):
                 add_image(item["image"], keep_next=True)
-            if show_answers and show_written_answers:
+            if show_written_answers:
                 if item.get("content"):
                     c = _dx_clean(item["content"])
                     crtl = bool(_RTL_RE.search(c)) and _para_is_rtl(c)
