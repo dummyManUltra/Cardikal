@@ -453,6 +453,7 @@ PDF_AK_NUDGE_CM        = {}    # user_id -> float, how many cm to shift the answ
 AWAITING_AK_STYLE      = {}    # user_id -> True, while the /pdf_start setup flow is waiting on the answer-key style choice
 PDF_ZIKR               = {}    # user_id -> bool, print the dhikr above the answer box (absent = on)
 PDF_THEME              = {}    # user_id -> key of THEMES (colour theme); absent = DEFAULT_THEME
+PDF_AK_FLIP            = {}    # user_id -> True/False: answer box upside down (default AK_UPSIDE_DOWN)
 PDF_QNUM_COLOR         = {}    # user_id -> '#RRGGBB' for the question numbers (Q1, Q2…); absent = the theme's own
 AWAITING_QNUM_HEX      = {}    # user_id -> True while waiting for a typed hex colour
 AWAITING_THEME         = {}    # user_id -> True, while the /pdf_start setup flow is waiting on the colour-theme choice
@@ -1949,7 +1950,9 @@ def export_keyboard(user_id: int = None):
                               callback_data="theme_pick"),
          InlineKeyboardButton("🕋 Zikr: " + ("✅ on" if PDF_ZIKR.get(user_id, True) else "⬜ off"),
                               callback_data="toggle_zikr")],
-        [InlineKeyboardButton("🔢 لون رقم السؤال", callback_data="qnum_pick")],
+        [InlineKeyboardButton("🔢 لون رقم السؤال", callback_data="qnum_pick"),
+         InlineKeyboardButton("🔄 Box: " + ("⬆️ Upright" if not PDF_AK_FLIP.get(user_id, AK_UPSIDE_DOWN) else "🔃 Flipped"),
+                              callback_data="toggle_flip")],
         [InlineKeyboardButton("🆕 New session", callback_data="new_session"),
          InlineKeyboardButton("🗑 Clear & Cancel", callback_data="clear_pdf")],
     ])
@@ -2222,8 +2225,9 @@ class _AnswerKeyCanvas(_canvas.Canvas):
                  ak_style="grouped", ak_nudge_cm=0.0,
                  ak_right_margin=2*cm, ak_top_margin=2.5*cm,
                  ak_wall_gap_cm=0.5, ak_up_nudge_cm=4.0, ak_box_w=None,
-                 ak_content_box=None, ak_theme=None, ak_zikr=True, ak_scale=1.0, ak_text_scale=1.0, **kwargs):
+                 ak_content_box=None, ak_theme=None, ak_zikr=True, ak_scale=1.0, ak_text_scale=1.0, ak_flip=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._ak_flip = AK_UPSIDE_DOWN if ak_flip is None else bool(ak_flip)   # box drawn upside down (180°)?
         self._ak_zikr = bool(ak_zikr)                       # print the dhikr above the box?
         self._ak_scale = float(ak_scale or 1.0)             # size of the whole box
         self._ak_tscale = float(ak_text_scale or 1.0)       # size of the text inside it
@@ -2358,7 +2362,7 @@ class _AnswerKeyCanvas(_canvas.Canvas):
                                   extra_top=AK_ZIKR_H if self._ak_zikr else 0, scale=sc)
 
         self.saveState()
-        if AK_UPSIDE_DOWN:
+        if self._ak_flip:
             self.translate(X + W / 2, Y + H / 2); self.rotate(180); self.translate(-(X + W / 2), -(Y + H / 2))
         self.translate(X, Y); self.scale(sc, sc)            # everything below is drawn at 100 % from (0, 0)
         x, y, w, h = 0, 0, W / sc, H / sc
@@ -2408,7 +2412,7 @@ class _AnswerKeyCanvas(_canvas.Canvas):
                                   self._ak_up_nudge_cm, self._ak_content_box,
                                   extra_top=AK_ZIKR_H if self._ak_zikr else 0, scale=sc)
         self.saveState()
-        if AK_UPSIDE_DOWN:
+        if self._ak_flip:
             self.translate(X + W / 2, Y + H / 2); self.rotate(180); self.translate(-(X + W / 2), -(Y + H / 2))
         self.translate(X, Y); self.scale(sc, sc)
         x, y, w, h = 0, 0, W / sc, H / sc
@@ -2494,7 +2498,7 @@ class _AnswerKeyCanvas(_canvas.Canvas):
             x_left, y_bottom = self._clamp_to_content(x_left, y_bottom, box_w, box_h)
 
         self.saveState()
-        if AK_UPSIDE_DOWN:
+        if self._ak_flip:
             cx_, cy_ = x_left + box_w / 2, y_bottom + box_h / 2
             self.translate(cx_, cy_); self.rotate(180); self.translate(-cx_, -cy_)
         self.setFillColor(fill_color)
@@ -2766,11 +2770,27 @@ def _atomic_split(block, availWidth, availHeight, parts, info):
         # reportlab refuses a plain "can't split" while this frame is still empty,
         # so ask for the frame break explicitly there
         return [FrameBreak(), block] if at_top else []
-    if not too_tall and not at_top and getattr(block, '_moves', 0) < 4:
+    # Only the very top of the page's FIRST frame means "this block can't fit even on a fresh page".
+    # A later frame (the narrow one beside the answer box) is also empty at its top, yet the block
+    # still fits on the next page — it must move there whole, not be broken up (that left the
+    # leading separator line stranded at the bottom of the page).
+    at_page_top = at_top and (fr is None or getattr(fr, 'id', None) == info.get('_first'))
+    if not too_tall and not at_page_top and getattr(block, '_moves', 0) < 4:
         block._moves = getattr(block, '_moves', 0) + 1   # try the next page(s), still in one piece
         return [PageBreak(), block]
     try:
-        first_h = parts[0].wrap(availWidth, 10 ** 6)[1]
+        # The leading Spacer / dashed separator / Spacer must never be left alone at the bottom of a
+        # frame while the content that follows them moves on: require room for them AND the start
+        # of the first real part (a few lines at most), otherwise they move on together.
+        k, lead_h = 0, 0
+        while k < len(parts) and isinstance(parts[k], (Spacer, _DashedSeparator)):
+            lead_h += parts[k].wrap(availWidth, 10 ** 6)[1] + (parts[k].getSpaceBefore() or 0) + (parts[k].getSpaceAfter() or 0)
+            k += 1
+        if k and k < len(parts):
+            lead_h += min(parts[k].wrap(availWidth, 10 ** 6)[1], 52)
+            first_h = lead_h
+        else:
+            first_h = parts[0].wrap(availWidth, 10 ** 6)[1]
     except Exception:
         first_h = 0
     if first_h > availHeight:
@@ -2877,6 +2897,19 @@ class _KeepOnPage(KeepTogether):
         if fr is not None and getattr(fr, 'id', None) != self._info.get('_last') and self._info.get('_last'):
             if aH < 2.0 * cm:                  # too little room left to start here: next frame
                 return [FrameBreak(), self] if getattr(fr, '_atTop', False) else []
+            # Flowing on into the next frame is fine only while the rest of the question still fits on
+            # THIS page; otherwise the question would end up cut across two pages — move it whole.
+            try:
+                need = sum(f.wrap(aW, 10 ** 6)[1] + (f.getSpaceBefore() or 0) + (f.getSpaceAfter() or 0)
+                           for f in self._content) * 1.10
+                rest = aH + (self._info.get('_after') or {}).get(getattr(fr, 'id', None), 0)
+                page_room = self._info.get('_page_room') or 0
+                at_page_top = bool(getattr(fr, '_atTop', False)) and getattr(fr, 'id', None) == self._info.get('_first')
+                if need > rest and need < page_room * 0.95 and not at_page_top and getattr(self, '_moves', 0) < 4:
+                    self._moves = getattr(self, '_moves', 0) + 1
+                    return [PageBreak(), self]
+            except Exception:
+                pass
             return list(self._content)
         return KeepTogether.split(self, aW, aH)
 
@@ -3043,6 +3076,10 @@ class _ZonedDoc(SimpleDocTemplate):
             f._reset()
         self.frame_tops[self.page] = [f._y1 + f._height - f._topPadding for f in frames]
         self.frame_tops['_last'] = frames[-1].id
+        self.frame_tops['_first'] = frames[0].id
+        _hs = [f._height - f._topPadding - f._bottomPadding for f in frames]
+        self.frame_tops['_after'] = {f.id: sum(_hs[i + 1:]) for i, f in enumerate(frames)}   # room in the frames still to come on this page
+        self.frame_tops['_page_room'] = sum(_hs)
         self.frame_tops['_fullh'] = H - 12      # height of an unzoned page's frame
         self.frame_tops['_maxh'] = max(f._height - f._topPadding - f._bottomPadding for f in frames)   # tallest frame on this page
 
@@ -3060,7 +3097,8 @@ def build_pdf(items: list, doc_title: str = "questions", font_path: str = None,
               show_written_answers: bool = True,
               zikr: bool = True,
               ak_scale: float = DEFAULT_AK_SCALE, ak_text_scale: float = DEFAULT_AK_TEXT_SCALE,
-              theme: str = DEFAULT_THEME, title_font_path: str = None, q_num_color: str = None) -> BytesIO:
+              theme: str = DEFAULT_THEME, title_font_path: str = None, q_num_color: str = None,
+              ak_flip: bool = None) -> BytesIO:
     items = normalize_items_for_render(items)
     buffer = BytesIO()
     _TITLE_TLS.font = None
@@ -3252,6 +3290,13 @@ def build_pdf(items: list, doc_title: str = "questions", font_path: str = None,
         borderWidth=0.8, borderPadding=7, borderRadius=4,
         spaceBefore=8, spaceAfter=6,
     )
+
+    # Lines of one paragraph may be split across the frames of a page (full width above the answer box,
+    # narrower beside it): without this reportlab refuses to leave a lone first/last line behind and
+    # pushes the whole choice to the next frame, which leaves an odd empty gap in the middle of a question.
+    for _st in (Q_STYLE, OPT_STYLE, OPT_CORRECT, WRITTEN_TITLE, WRITTEN_BODY, WRITTEN_ANSWER, IMG_CAPTION):
+        _st.allowOrphans = 1
+        _st.allowWidows = 1
 
     _rtl_styles = {}
 
@@ -3469,7 +3514,7 @@ def build_pdf(items: list, doc_title: str = "questions", font_path: str = None,
                 ak_wall_gap_cm=ak_wall_gap_cm, ak_up_nudge_cm=ak_up_nudge_cm,
                 ak_box_w=AK_BOX_W,
                 ak_content_box=FRAME_BOX,
-                ak_theme=T, ak_zikr=zikr, ak_scale=ak_scale, ak_text_scale=ak_text_scale,
+                ak_theme=T, ak_zikr=zikr, ak_scale=ak_scale, ak_text_scale=ak_text_scale, ak_flip=ak_flip,
                 **kwargs,
             )
         zdoc.build(story,
@@ -3707,7 +3752,7 @@ def _dx_table_box(doc, after_par, rows, col_w, x_left, y_top, row_h, font, *, bo
     after_par._p.addnext(t)
     return tbl
 
-def _dx_box_image(pairs, style, *, wall_gap_cm, nudge_cm, up_nudge_cm, box_w_pt, content_box, theme, zikr=True, scale=1.0, text_scale=1.0):
+def _dx_box_image(pairs, style, *, wall_gap_cm, nudge_cm, up_nudge_cm, box_w_pt, content_box, theme, zikr=True, scale=1.0, text_scale=1.0, flip=None):
     """The per-page answer box (with its zikr) as a transparent PNG, drawn by the very same code
     as the PDF's box. Returns (png_stream, x_pt, y_top_pt, w_pt, h_pt) — position measured from the
     page's top-left corner — or None when it can't be rendered."""
@@ -3724,7 +3769,7 @@ def _dx_box_image(pairs, style, *, wall_gap_cm, nudge_cm, up_nudge_cm, box_w_pt,
                              ak_style=style, ak_nudge_cm=nudge_cm, ak_wall_gap_cm=wall_gap_cm,
                              ak_up_nudge_cm=up_nudge_cm, ak_box_w=box_w_pt,
                              ak_content_box=content_box, ak_theme=theme, ak_zikr=zikr,
-                             ak_scale=scale, ak_text_scale=text_scale)
+                             ak_scale=scale, ak_text_scale=text_scale, ak_flip=flip)
         c.showPage()
         c.save()
         SC = 4.0                                            # ≈ 290 dpi — crisp when printed
@@ -3757,7 +3802,7 @@ def _dx_box_image(pairs, style, *, wall_gap_cm, nudge_cm, up_nudge_cm, box_w_pt,
         return None
 
 def _dx_answer_box(doc, after_par, pairs, style, *, wall_gap_cm, nudge_cm, up_nudge_cm, box_w_pt, font="Calibri", font_path=None,
-                   content_box=None, theme=None, zikr=True, scale=1.0, text_scale=1.0):
+                   content_box=None, theme=None, zikr=True, scale=1.0, text_scale=1.0, flip=None):
     """Floating table = the per-page answer key. Anchored to the paragraph it follows, so it
     lands on that paragraph's page, at the same spot as the PDF's box (measured from the
     page's right edge / bottom edge). Fully editable in Word."""
@@ -3766,7 +3811,7 @@ def _dx_answer_box(doc, after_par, pairs, style, *, wall_gap_cm, nudge_cm, up_nu
     # Preferred: the box as a picture (looks exactly like the PDF's, can't be mangled by Word).
     pic = _dx_box_image(pairs, style, wall_gap_cm=wall_gap_cm, nudge_cm=nudge_cm, up_nudge_cm=up_nudge_cm,
                         box_w_pt=box_w_pt, content_box=content_box, theme=theme or THEMES[DEFAULT_THEME], zikr=zikr,
-                        scale=scale, text_scale=text_scale)
+                        scale=scale, text_scale=text_scale, flip=flip)
     if pic:
         stream, px, py, pw, ph = pic
         _dx_picture_run(after_par, stream, pw, ph, px, py, behind=False, rel_height=50)
@@ -3796,7 +3841,7 @@ def _dx_answer_box(doc, after_par, pairs, style, *, wall_gap_cm, nudge_cm, up_nu
     y_top = PAGE_H - (box_bottom + h)
     tw = lambda pt: int(round(pt * 20))
 
-    flip = AK_UPSIDE_DOWN
+    flip = AK_UPSIDE_DOWN if flip is None else bool(flip)
     if style == "column":
         from reportlab.pdfbase import pdfmetrics as _pm
         num_w = max(_pm.stringWidth(f"{q}.", FONT_NAME_BOLD, 13) for q, _ in pairs) + 14
@@ -3834,7 +3879,7 @@ def build_docx(items: list, doc_title: str = "questions", font_path: str = None,
                opt_gap_cm: float = DEFAULT_OPT_GAP_CM,
                show_written_answers: bool = True,
                zikr: bool = True,
-               ak_scale: float = DEFAULT_AK_SCALE, ak_text_scale: float = DEFAULT_AK_TEXT_SCALE,
+               ak_scale: float = DEFAULT_AK_SCALE, ak_text_scale: float = DEFAULT_AK_TEXT_SCALE, ak_flip: bool = None,
                theme: str = DEFAULT_THEME, q_num_color: str = None,
                **_ignored) -> BytesIO:
     from docx import Document
@@ -3919,7 +3964,7 @@ def build_docx(items: list, doc_title: str = "questions", font_path: str = None,
         if pend["box"]:
             _dx_answer_box(doc, p, pend["box"], ak_style, wall_gap_cm=ak_wall_gap_cm,
                            nudge_cm=ak_nudge_cm, up_nudge_cm=ak_up_nudge_cm, box_w_pt=AK_BOX_W, font=FONT, font_path=font_path,
-                           content_box=fbox, theme=T, zikr=zikr, scale=ak_scale, text_scale=ak_text_scale)
+                           content_box=fbox, theme=T, zikr=zikr, scale=ak_scale, text_scale=ak_text_scale, flip=ak_flip)
             pend["box"] = None
         return p
 
@@ -4336,7 +4381,7 @@ async def _send_preview(context: ContextTypes.DEFAULT_TYPE, message, user_id: in
             ak_style=PDF_AK_STYLE.get(user_id, "grouped"),
             theme=PDF_THEME.get(user_id, DEFAULT_THEME), q_num_color=PDF_QNUM_COLOR.get(user_id), zikr=PDF_ZIKR.get(user_id, True),
             ak_scale=PDF_AK_SCALE.get(user_id, DEFAULT_AK_SCALE), ak_text_scale=PDF_AK_TEXT_SCALE.get(user_id, DEFAULT_AK_TEXT_SCALE),
-            ak_nudge_cm=ak_nudge_cm, font_size=font_size,
+            ak_nudge_cm=ak_nudge_cm, font_size=font_size, ak_flip=PDF_AK_FLIP.get(user_id, AK_UPSIDE_DOWN),
             top_margin_cm=top_margin_cm, ak_wall_gap_cm=ak_wall_gap_cm,
             ak_up_nudge_cm=ak_up_nudge_cm,
             cover_image_path=PDF_COVER_PATH.get(user_id),
@@ -5860,6 +5905,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print("toggle_written refresh error:", e)
 
+    elif query.data == "toggle_flip":
+        PDF_AK_FLIP[user_id] = not PDF_AK_FLIP.get(user_id, AK_UPSIDE_DOWN)
+        try:
+            await query.edit_message_reply_markup(reply_markup=export_keyboard(user_id))
+        except Exception as e:
+            print("toggle_flip refresh error:", e)
+
     elif query.data == "toggle_zikr":
         PDF_ZIKR[user_id] = not PDF_ZIKR.get(user_id, True)
         try:
@@ -6271,6 +6323,7 @@ def _reset_pdf_session(user_id: int) -> None:
     AWAITING_THEME.pop(user_id, None)
     AWAITING_QNUM_HEX.pop(user_id, None)
     PDF_QNUM_COLOR.pop(user_id, None)
+    PDF_AK_FLIP.pop(user_id, None)
     AWAITING_LAYOUT.pop(user_id, None)
     PDF_THEME.pop(user_id, None)
     PDF_ZIKR.pop(user_id, None)
@@ -6457,7 +6510,7 @@ async def _export_pdf_session(context: ContextTypes.DEFAULT_TYPE, message, sessi
         ak_style=PDF_AK_STYLE.get(session_id, "grouped"),
         theme=PDF_THEME.get(session_id, DEFAULT_THEME), q_num_color=PDF_QNUM_COLOR.get(session_id), zikr=PDF_ZIKR.get(session_id, True),
         ak_scale=PDF_AK_SCALE.get(session_id, DEFAULT_AK_SCALE), ak_text_scale=PDF_AK_TEXT_SCALE.get(session_id, DEFAULT_AK_TEXT_SCALE),
-        ak_nudge_cm=PDF_AK_NUDGE_CM.get(session_id, DEFAULT_AK_NUDGE_CM),
+        ak_nudge_cm=PDF_AK_NUDGE_CM.get(session_id, DEFAULT_AK_NUDGE_CM), ak_flip=PDF_AK_FLIP.get(session_id, AK_UPSIDE_DOWN),
         font_size=PDF_FONT_SIZE.get(session_id, DEFAULT_FONT_SIZE),
         top_margin_cm=PDF_TOP_MARGIN_CM.get(session_id, DEFAULT_TOP_MARGIN_CM),
         ak_wall_gap_cm=PDF_AK_WALL_GAP_CM.get(session_id, DEFAULT_AK_WALL_GAP_CM),
@@ -6505,7 +6558,7 @@ async def _export_pptx_session(context: ContextTypes.DEFAULT_TYPE, message, sess
         ak_style=PDF_AK_STYLE.get(session_id, "grouped"),
         theme=PDF_THEME.get(session_id, DEFAULT_THEME), q_num_color=PDF_QNUM_COLOR.get(session_id), zikr=PDF_ZIKR.get(session_id, True),
         ak_scale=PDF_AK_SCALE.get(session_id, DEFAULT_AK_SCALE), ak_text_scale=PDF_AK_TEXT_SCALE.get(session_id, DEFAULT_AK_TEXT_SCALE),
-        ak_nudge_cm=PDF_AK_NUDGE_CM.get(session_id, DEFAULT_AK_NUDGE_CM),
+        ak_nudge_cm=PDF_AK_NUDGE_CM.get(session_id, DEFAULT_AK_NUDGE_CM), ak_flip=PDF_AK_FLIP.get(session_id, AK_UPSIDE_DOWN),
         font_size=PDF_FONT_SIZE.get(session_id, DEFAULT_FONT_SIZE),
         top_margin_cm=PDF_TOP_MARGIN_CM.get(session_id, DEFAULT_TOP_MARGIN_CM),
         ak_wall_gap_cm=PDF_AK_WALL_GAP_CM.get(session_id, DEFAULT_AK_WALL_GAP_CM),
@@ -6559,7 +6612,7 @@ async def _export_docx_session(context: ContextTypes.DEFAULT_TYPE, message, sess
     )
     ak_kw = dict(
         ak_style=PDF_AK_STYLE.get(session_id, "grouped"),
-        ak_nudge_cm=PDF_AK_NUDGE_CM.get(session_id, DEFAULT_AK_NUDGE_CM),
+        ak_nudge_cm=PDF_AK_NUDGE_CM.get(session_id, DEFAULT_AK_NUDGE_CM), ak_flip=PDF_AK_FLIP.get(session_id, AK_UPSIDE_DOWN),
         ak_wall_gap_cm=PDF_AK_WALL_GAP_CM.get(session_id, DEFAULT_AK_WALL_GAP_CM),
         ak_up_nudge_cm=PDF_AK_UP_NUDGE_CM.get(session_id, DEFAULT_AK_UP_NUDGE_CM),
         ak_scale=PDF_AK_SCALE.get(session_id, DEFAULT_AK_SCALE),
